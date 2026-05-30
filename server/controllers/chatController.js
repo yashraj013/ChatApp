@@ -1,11 +1,11 @@
 import mongoose from "mongoose";
 import Session from "../models/sessionModel.js";
 import Message from "../models/messageModel.js";
+import { loadRecentMessages } from "../services/memoryService.js";
+import { buildChatPayload,generateAssistantReply } from "../services/llmService.js";
 
-const generateAssistantReply = async (userText) => {
-  // Placeholder until llmService is implemented
-  return `You said: ${userText}`;
-};
+
+
 
 export const createSession = async (req, res) => {
   try {
@@ -50,38 +50,39 @@ export const sendMessage = async (req, res) => {
     const { content } = req.body;
 
     if (!mongoose.Types.ObjectId.isValid(sessionId)) {
-      return res.status(400).json({
-        message: "Invalid session id",
-      });
+      return res.status(400).json({ message: "Invalid session id" });
     }
 
-    if (!content || !content.trim()) {
-      return res.status(400).json({
-        message: "Message content is required",
-      });
+    const userText = content?.trim();
+    if (!userText) {
+      return res.status(400).json({ message: "Message content is required" });
     }
 
     const session = await Session.findById(sessionId);
-
     if (!session) {
-      return res.status(404).json({
-        message: "Session not found",
-      });
+      return res.status(404).json({ message: "Session not found" });
     }
 
     if (session.userId.toString() !== req.userId) {
-      return res.status(403).json({
-        message: "Forbidden: this session does not belong to you",
-      });
+      return res
+        .status(403)
+        .json({ message: "Forbidden: this session does not belong to you" });
     }
 
     const userMessage = await Message.create({
       sessionId,
       role: "user",
-      content: content.trim(),
+      content: userText,
     });
 
-    const assistantText = await generateAssistantReply(content.trim());
+    // 19 history + current user message => max 20 chat messages to model
+    const history = await loadRecentMessages(sessionId, 19);
+    const payload = buildChatPayload(history, userText);
+
+    const assistantText = await generateAssistantReply(payload);
+    if (!assistantText) {
+      return res.status(502).json({ message: "LLM returned empty response" });
+    }
 
     const assistantMessage = await Message.create({
       sessionId,
@@ -89,14 +90,10 @@ export const sendMessage = async (req, res) => {
       content: assistantText,
     });
 
-    // Update session ordering for sidebar
     session.updatedAt = new Date();
     await session.save();
 
-    return res.status(201).json({
-      userMessage,
-      assistantMessage,
-    });
+    return res.status(201).json({ userMessage, assistantMessage });
   } catch (error) {
     return res.status(500).json({
       message: "Failed to send message",
